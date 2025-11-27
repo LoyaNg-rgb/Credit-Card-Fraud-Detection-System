@@ -1,0 +1,357 @@
+"""
+Fraud Detection Engine
+Core module for real-time fraud prediction and risk scoring
+"""
+
+import numpy as np
+import pandas as pd
+import pickle
+from typing import Dict, Tuple, List
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class FraudDetector:
+    """
+    Real-time fraud detection system with multi-model approach
+    """
+    
+    def __init__(self, model_path: str, scaler_path: str = None, 
+                 anomaly_model_path: str = None):
+        """
+        Initialize fraud detector with trained models
+        
+        Args:
+            model_path: Path to primary XGBoost model
+            scaler_path: Path to feature scaler
+            anomaly_model_path: Path to Isolation Forest model
+        """
+        self.model = self._load_model(model_path)
+        self.scaler = self._load_model(scaler_path) if scaler_path else None
+        self.anomaly_model = self._load_model(anomaly_model_path) if anomaly_model_path else None
+        
+        # Risk thresholds (adjustable based on business requirements)
+        self.thresholds = {
+            'low': 0.3,
+            'medium': 0.6,
+            'high': 0.8,
+            'critical': 0.95
+        }
+    
+    def _load_model(self, path: str):
+        """Load pickled model"""
+        try:
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Error loading model from {path}: {e}")
+            return None
+    
+    def predict(self, transaction: pd.DataFrame) -> Dict:
+        """
+        Predict fraud probability for a single transaction
+        
+        Args:
+            transaction: DataFrame with transaction features
+            
+        Returns:
+            Dictionary with prediction results and risk assessment
+        """
+        # Scale features if scaler is available
+        if self.scaler:
+            features_scaled = self.scaler.transform(transaction)
+        else:
+            features_scaled = transaction.values
+        
+        # Primary model prediction
+        fraud_prob = self.model.predict_proba(features_scaled)[0][1]
+        fraud_prediction = int(fraud_prob > 0.5)
+        
+        # Anomaly detection (if available)
+        anomaly_score = None
+        if self.anomaly_model:
+            anomaly_score = self.anomaly_model.score_samples(features_scaled)[0]
+            is_anomaly = self.anomaly_model.predict(features_scaled)[0] == -1
+        else:
+            is_anomaly = False
+        
+        # Risk level assessment
+        risk_level = self._assess_risk_level(fraud_prob)
+        
+        # Generate recommendation
+        recommendation = self._generate_recommendation(
+            fraud_prob, risk_level, is_anomaly
+        )
+        
+        return {
+            'fraud_probability': fraud_prob,
+            'is_fraud': fraud_prediction,
+            'risk_level': risk_level,
+            'is_anomaly': is_anomaly,
+            'anomaly_score': anomaly_score,
+            'recommendation': recommendation,
+            'requires_review': fraud_prob > self.thresholds['medium']
+        }
+    
+    def predict_batch(self, transactions: pd.DataFrame) -> pd.DataFrame:
+        """
+        Predict fraud for multiple transactions
+        
+        Args:
+            transactions: DataFrame with multiple transaction records
+            
+        Returns:
+            DataFrame with predictions and risk scores
+        """
+        # Scale features
+        if self.scaler:
+            features_scaled = self.scaler.transform(transactions)
+        else:
+            features_scaled = transactions.values
+        
+        # Predictions
+        fraud_probs = self.model.predict_proba(features_scaled)[:, 1]
+        predictions = (fraud_probs > 0.5).astype(int)
+        
+        # Risk levels
+        risk_levels = [self._assess_risk_level(prob) for prob in fraud_probs]
+        
+        # Anomaly detection
+        if self.anomaly_model:
+            anomalies = self.anomaly_model.predict(features_scaled)
+            anomaly_scores = self.anomaly_model.score_samples(features_scaled)
+        else:
+            anomalies = np.zeros(len(transactions))
+            anomaly_scores = np.zeros(len(transactions))
+        
+        # Create results DataFrame
+        results = pd.DataFrame({
+            'fraud_probability': fraud_probs,
+            'is_fraud': predictions,
+            'risk_level': risk_levels,
+            'is_anomaly': (anomalies == -1).astype(int),
+            'anomaly_score': anomaly_scores,
+            'requires_review': fraud_probs > self.thresholds['medium']
+        })
+        
+        return results
+    
+    def _assess_risk_level(self, probability: float) -> str:
+        """Categorize fraud probability into risk levels"""
+        if probability >= self.thresholds['critical']:
+            return 'CRITICAL'
+        elif probability >= self.thresholds['high']:
+            return 'HIGH'
+        elif probability >= self.thresholds['medium']:
+            return 'MEDIUM'
+        elif probability >= self.thresholds['low']:
+            return 'LOW'
+        else:
+            return 'MINIMAL'
+    
+    def _generate_recommendation(self, prob: float, risk: str, 
+                                 is_anomaly: bool) -> str:
+        """Generate action recommendation based on risk assessment"""
+        if risk == 'CRITICAL':
+            return "BLOCK TRANSACTION - Immediate manual review required"
+        elif risk == 'HIGH':
+            return "FLAG FOR REVIEW - High fraud likelihood detected"
+        elif risk == 'MEDIUM':
+            return "ENHANCED VERIFICATION - Request additional authentication"
+        elif is_anomaly:
+            return "MONITOR - Unusual pattern detected, track user behavior"
+        else:
+            return "APPROVE - Low risk transaction"
+    
+    def explain_prediction(self, transaction: pd.DataFrame, 
+                          feature_names: List[str]) -> Dict:
+        """
+        Explain model prediction using feature contributions
+        
+        Args:
+            transaction: Transaction features
+            feature_names: List of feature names
+            
+        Returns:
+            Dictionary with top contributing features
+        """
+        try:
+            import shap
+            
+            explainer = shap.TreeExplainer(self.model)
+            shap_values = explainer.shap_values(transaction)
+            
+            # Get feature contributions
+            contributions = pd.DataFrame({
+                'feature': feature_names,
+                'contribution': shap_values[0]
+            }).sort_values('contribution', key=abs, ascending=False)
+            
+            return {
+                'top_features': contributions.head(5).to_dict('records'),
+                'base_value': explainer.expected_value,
+                'prediction_value': shap_values[0].sum() + explainer.expected_value
+            }
+        except ImportError:
+            return {'error': 'SHAP library not installed'}
+    
+    def update_thresholds(self, new_thresholds: Dict[str, float]):
+        """Update risk thresholds for different business scenarios"""
+        self.thresholds.update(new_thresholds)
+        print(f"Updated thresholds: {self.thresholds}")
+    
+    def get_performance_metrics(self, y_true: np.ndarray, 
+                               y_pred_proba: np.ndarray) -> Dict:
+        """
+        Calculate model performance metrics
+        
+        Args:
+            y_true: True labels
+            y_pred_proba: Predicted probabilities
+            
+        Returns:
+            Dictionary with performance metrics
+        """
+        from sklearn.metrics import (
+            roc_auc_score, precision_recall_curve, 
+            confusion_matrix, classification_report
+        )
+        
+        y_pred = (y_pred_proba > 0.5).astype(int)
+        
+        # ROC-AUC
+        roc_auc = roc_auc_score(y_true, y_pred_proba)
+        
+        # Precision-Recall
+        precision, recall, thresholds = precision_recall_curve(y_true, y_pred_proba)
+        
+        # Confusion Matrix
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        
+        # Calculate additional metrics
+        fpr = fp / (fp + tn)  # False Positive Rate
+        fnr = fn / (fn + tp)  # False Negative Rate
+        
+        return {
+            'roc_auc': roc_auc,
+            'precision': tp / (tp + fp) if (tp + fp) > 0 else 0,
+            'recall': tp / (tp + fn) if (tp + fn) > 0 else 0,
+            'f1_score': 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else 0,
+            'false_positive_rate': fpr,
+            'false_negative_rate': fnr,
+            'confusion_matrix': {
+                'true_negative': int(tn),
+                'false_positive': int(fp),
+                'false_negative': int(fn),
+                'true_positive': int(tp)
+            }
+        }
+
+
+class RealTimeFraudMonitor:
+    """
+    Real-time monitoring system for fraud detection
+    """
+    
+    def __init__(self, detector: FraudDetector):
+        self.detector = detector
+        self.alert_history = []
+        self.transaction_history = []
+    
+    def monitor_transaction(self, transaction: pd.DataFrame, 
+                          transaction_id: str) -> Dict:
+        """
+        Monitor and log transaction in real-time
+        
+        Args:
+            transaction: Transaction features
+            transaction_id: Unique transaction identifier
+            
+        Returns:
+            Monitoring results with alerts
+        """
+        # Get prediction
+        result = self.detector.predict(transaction)
+        
+        # Log transaction
+        self.transaction_history.append({
+            'transaction_id': transaction_id,
+            'timestamp': pd.Timestamp.now(),
+            'fraud_probability': result['fraud_probability'],
+            'risk_level': result['risk_level']
+        })
+        
+        # Generate alert if needed
+        if result['requires_review']:
+            alert = self._create_alert(transaction_id, result)
+            self.alert_history.append(alert)
+            result['alert'] = alert
+        
+        return result
+    
+    def _create_alert(self, transaction_id: str, result: Dict) -> Dict:
+        """Create fraud alert"""
+        return {
+            'alert_id': f"ALERT_{len(self.alert_history) + 1}",
+            'transaction_id': transaction_id,
+            'timestamp': pd.Timestamp.now(),
+            'risk_level': result['risk_level'],
+            'fraud_probability': result['fraud_probability'],
+            'recommendation': result['recommendation'],
+            'status': 'PENDING'
+        }
+    
+    def get_alerts(self, status: str = None, min_risk: str = None) -> List[Dict]:
+        """Retrieve alerts with optional filtering"""
+        alerts = self.alert_history
+        
+        if status:
+            alerts = [a for a in alerts if a['status'] == status]
+        
+        if min_risk:
+            risk_order = ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+            min_idx = risk_order.index(min_risk)
+            alerts = [a for a in alerts 
+                     if risk_order.index(a['risk_level']) >= min_idx]
+        
+        return alerts
+    
+    def get_statistics(self, time_window: str = '1H') -> Dict:
+        """Get fraud statistics for specified time window"""
+        df = pd.DataFrame(self.transaction_history)
+        
+        if df.empty:
+            return {}
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        recent = df[df['timestamp'] > pd.Timestamp.now() - pd.Timedelta(time_window)]
+        
+        return {
+            'total_transactions': len(recent),
+            'high_risk_count': len(recent[recent['risk_level'].isin(['HIGH', 'CRITICAL'])]),
+            'avg_fraud_probability': recent['fraud_probability'].mean(),
+            'max_fraud_probability': recent['fraud_probability'].max(),
+            'time_window': time_window
+        }
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # This section demonstrates how to use the fraud detector
+    
+    # Example: Load model and make prediction
+    # detector = FraudDetector('models/xgboost_model.pkl', 
+    #                         'models/scaler.pkl',
+    #                         'models/isolation_forest.pkl')
+    
+    # Create sample transaction
+    # transaction = pd.DataFrame({...})  # Your transaction features
+    
+    # Get prediction
+    # result = detector.predict(transaction)
+    # print(f"Fraud Probability: {result['fraud_probability']:.2%}")
+    # print(f"Risk Level: {result['risk_level']}")
+    # print(f"Recommendation: {result['recommendation']}")
+    
+    print("Fraud Detection System - Ready for deployment")
+    print("Import this module and initialize FraudDetector with your trained models")
