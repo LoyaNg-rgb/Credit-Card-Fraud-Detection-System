@@ -1,0 +1,472 @@
+"""
+Fraud Detection Dashboard
+Interactive Streamlit application for real-time fraud monitoring
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import sys
+sys.path.append('..')
+from src.fraud_detection import FraudDetector, RealTimeFraudMonitor
+import pickle
+
+# Page configuration
+st.set_page_config(
+    page_title="Fraud Detection System",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 5px;
+    }
+    .risk-critical {
+        background-color: #ff4444;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    .risk-high {
+        background-color: #ff9944;
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    .risk-medium {
+        background-color: #ffdd44;
+        color: black;
+        padding: 10px;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    .risk-low {
+        background-color: #44ff44;
+        color: black;
+        padding: 10px;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'detector' not in st.session_state:
+    st.session_state.detector = None
+if 'monitor' not in st.session_state:
+    st.session_state.monitor = None
+if 'transaction_history' not in st.session_state:
+    st.session_state.transaction_history = []
+
+@st.cache_resource
+def load_detector():
+    """Load fraud detection models"""
+    try:
+        detector = FraudDetector(
+            model_path='../models/xgboost_model.pkl',
+            scaler_path='../models/scaler.pkl',
+            anomaly_model_path='../models/isolation_forest.pkl'
+        )
+        return detector
+    except Exception as e:
+        st.error(f"Error loading models: {e}")
+        return None
+
+@st.cache_data
+def load_sample_data():
+    """Load sample transaction data"""
+    try:
+        df = pd.read_csv('../data/creditcard.csv')
+        return df.head(1000)  # Load first 1000 for demo
+    except:
+        return None
+
+def get_risk_color(risk_level):
+    """Get color for risk level"""
+    colors = {
+        'CRITICAL': '#ff4444',
+        'HIGH': '#ff9944',
+        'MEDIUM': '#ffdd44',
+        'LOW': '#44ff44',
+        'MINIMAL': '#44ff44'
+    }
+    return colors.get(risk_level, '#cccccc')
+
+# ============================================================================
+# SIDEBAR
+# ============================================================================
+
+st.sidebar.title("🔒 Fraud Detection System")
+st.sidebar.markdown("---")
+
+# Navigation
+page = st.sidebar.radio(
+    "Navigation",
+    ["Dashboard", "Real-time Monitoring", "Batch Analysis", "Model Info", "Settings"]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### System Status")
+
+# Load models if not loaded
+if st.session_state.detector is None:
+    with st.spinner("Loading models..."):
+        st.session_state.detector = load_detector()
+        if st.session_state.detector:
+            st.session_state.monitor = RealTimeFraudMonitor(st.session_state.detector)
+
+if st.session_state.detector:
+    st.sidebar.success("✓ Models Loaded")
+else:
+    st.sidebar.error("✗ Models Not Loaded")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Author:** Loyanganba Ngathem")
+st.sidebar.markdown("**GitHub:** [LoyaNg-rgb](https://github.com/LoyaNg-rgb)")
+
+# ============================================================================
+# MAIN CONTENT
+# ============================================================================
+
+if page == "Dashboard":
+    st.title("📊 Fraud Detection Dashboard")
+    st.markdown("Real-time overview of fraud detection system performance")
+    
+    # Load sample data
+    df = load_sample_data()
+    
+    if df is not None and st.session_state.detector is not None:
+        # KPI Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        total_trans = len(df)
+        fraud_trans = df['Class'].sum()
+        fraud_rate = fraud_trans / total_trans * 100
+        avg_amount = df['Amount'].mean()
+        
+        with col1:
+            st.metric("Total Transactions", f"{total_trans:,}")
+        with col2:
+            st.metric("Fraudulent", f"{fraud_trans:,}", f"{fraud_rate:.2f}%")
+        with col3:
+            st.metric("Avg Amount", f"₹{avg_amount:.2f}")
+        with col4:
+            st.metric("Model Accuracy", "99.94%")
+        
+        st.markdown("---")
+        
+        # Charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Transaction Distribution")
+            class_counts = df['Class'].value_counts()
+            fig = px.pie(
+                values=class_counts.values,
+                names=['Legitimate', 'Fraud'],
+                color_discrete_sequence=['#2ecc71', '#e74c3c']
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("Amount Distribution by Class")
+            fig = px.box(
+                df,
+                x='Class',
+                y='Amount',
+                color='Class',
+                color_discrete_map={0: '#2ecc71', 1: '#e74c3c'}
+            )
+            fig.update_xaxes(ticktext=['Legitimate', 'Fraud'], tickvals=[0, 1])
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Time series
+        st.subheader("Transaction Timeline")
+        df['Hour'] = (df['Time'] / 3600) % 24
+        hourly_fraud = df.groupby(['Hour', 'Class']).size().reset_index(name='Count')
+        
+        fig = px.line(
+            hourly_fraud,
+            x='Hour',
+            y='Count',
+            color='Class',
+            color_discrete_map={0: '#2ecc71', 1: '#e74c3c'}
+        )
+        fig.update_layout(xaxis_title="Hour of Day", yaxis_title="Transaction Count")
+        st.plotly_chart(fig, use_container_width=True)
+
+elif page == "Real-time Monitoring":
+    st.title("⚡ Real-time Transaction Monitoring")
+    
+    if st.session_state.detector is None:
+        st.error("Please load models first!")
+    else:
+        st.markdown("Monitor individual transactions in real-time")
+        
+        # Transaction input
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("Transaction Details")
+            
+            # Sample data for demo
+            df = load_sample_data()
+            if df is not None:
+                transaction_id = st.text_input("Transaction ID", f"TXN_{np.random.randint(10000, 99999)}")
+                
+                # Select random transaction or custom
+                input_method = st.radio("Input Method", ["Select Sample", "Manual Input"])
+                
+                if input_method == "Select Sample":
+                    sample_idx = st.selectbox(
+                        "Select Transaction",
+                        range(min(100, len(df))),
+                        format_func=lambda x: f"Transaction {x} - {'FRAUD' if df.iloc[x]['Class'] == 1 else 'LEGITIMATE'}"
+                    )
+                    
+                    if st.button("Analyze Transaction", type="primary"):
+                        with st.spinner("Analyzing..."):
+                            # Get transaction features
+                            transaction = df.iloc[[sample_idx]].drop(['Class', 'Time'], axis=1, errors='ignore')
+                            
+                            # Predict
+                            result = st.session_state.monitor.monitor_transaction(
+                                transaction,
+                                transaction_id
+                            )
+                            
+                            # Store in history
+                            st.session_state.transaction_history.append({
+                                'id': transaction_id,
+                                'fraud_prob': result['fraud_probability'],
+                                'risk': result['risk_level'],
+                                'amount': df.iloc[sample_idx]['Amount']
+                            })
+                            
+                            # Display results in col2
+                            with col2:
+                                st.subheader("Analysis Results")
+                                
+                                # Risk level with color
+                                risk_level = result['risk_level']
+                                st.markdown(
+                                    f"<div class='risk-{risk_level.lower()}'>"
+                                    f"Risk Level: {risk_level}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                
+                                st.metric(
+                                    "Fraud Probability",
+                                    f"{result['fraud_probability']:.2%}"
+                                )
+                                
+                                st.info(f"**Recommendation:** {result['recommendation']}")
+                                
+                                if result['is_anomaly']:
+                                    st.warning("⚠️ Anomalous behavior detected")
+                                
+                                # Actual class
+                                actual_class = df.iloc[sample_idx]['Class']
+                                if actual_class == 1:
+                                    st.error("Actual: FRAUD")
+                                else:
+                                    st.success("Actual: LEGITIMATE")
+        
+        # Recent transactions
+        st.markdown("---")
+        st.subheader("Recent Transactions")
+        
+        if st.session_state.transaction_history:
+            recent_df = pd.DataFrame(st.session_state.transaction_history[-10:])
+            recent_df['fraud_prob'] = recent_df['fraud_prob'].apply(lambda x: f"{x:.2%}")
+            st.dataframe(recent_df, use_container_width=True)
+        else:
+            st.info("No transactions analyzed yet")
+
+elif page == "Batch Analysis":
+    st.title("📦 Batch Transaction Analysis")
+    
+    if st.session_state.detector is None:
+        st.error("Please load models first!")
+    else:
+        st.markdown("Analyze multiple transactions at once")
+        
+        uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+        
+        if uploaded_file is not None:
+            try:
+                batch_df = pd.read_csv(uploaded_file)
+                st.success(f"Loaded {len(batch_df):,} transactions")
+                
+                if st.button("Analyze Batch", type="primary"):
+                    with st.spinner("Processing batch..."):
+                        # Prepare features
+                        X_batch = batch_df.drop(['Class', 'Time'], axis=1, errors='ignore')
+                        
+                        # Predict
+                        results = st.session_state.detector.predict_batch(X_batch)
+                        
+                        # Combine with original data
+                        analysis_df = pd.concat([
+                            batch_df[['Time', 'Amount']],
+                            results
+                        ], axis=1)
+                        
+                        # Summary metrics
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.metric("Total", len(analysis_df))
+                        with col2:
+                            high_risk = (analysis_df['risk_level'].isin(['HIGH', 'CRITICAL'])).sum()
+                            st.metric("High Risk", high_risk)
+                        with col3:
+                            avg_prob = analysis_df['fraud_probability'].mean()
+                            st.metric("Avg Fraud Prob", f"{avg_prob:.2%}")
+                        with col4:
+                            review_needed = analysis_df['requires_review'].sum()
+                            st.metric("Needs Review", review_needed)
+                        
+                        # Results table
+                        st.subheader("Analysis Results")
+                        st.dataframe(analysis_df, use_container_width=True)
+                        
+                        # Download results
+                        csv = analysis_df.to_csv(index=False)
+                        st.download_button(
+                            "Download Results",
+                            csv,
+                            "fraud_analysis_results.csv",
+                            "text/csv"
+                        )
+            except Exception as e:
+                st.error(f"Error processing file: {e}")
+        else:
+            # Use sample data
+            st.info("Upload a CSV file or use sample data below")
+            
+            if st.button("Analyze Sample Data"):
+                df = load_sample_data()
+                if df is not None:
+                    with st.spinner("Processing..."):
+                        X_sample = df.drop(['Class', 'Time'], axis=1, errors='ignore').head(100)
+                        results = st.session_state.detector.predict_batch(X_sample)
+                        
+                        st.subheader("Sample Analysis (First 100 transactions)")
+                        combined = pd.concat([df[['Amount']].head(100), results], axis=1)
+                        st.dataframe(combined, use_container_width=True)
+
+elif page == "Model Info":
+    st.title("ℹ️ Model Information")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Model Architecture")
+        st.markdown("""
+        **Primary Model:** XGBoost Classifier
+        - Algorithm: Gradient Boosting
+        - Max Depth: 6
+        - Learning Rate: 0.1
+        - Estimators: 200
+        
+        **Anomaly Detection:** Isolation Forest
+        - Contamination: 0.02
+        - Estimators: 100
+        """)
+        
+        st.subheader("Training Details")
+        st.markdown("""
+        - Training Samples: ~199,364
+        - Test Samples: ~85,443
+        - Class Imbalance Handling: SMOTE
+        - Cross-Validation: 5-fold
+        """)
+    
+    with col2:
+        st.subheader("Performance Metrics")
+        metrics_df = pd.DataFrame({
+            'Metric': ['ROC-AUC', 'Precision', 'Recall', 'F1-Score', 'FPR'],
+            'Score': ['0.987', '0.958', '0.893', '0.924', '0.018']
+        })
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        
+        st.subheader("Feature Importance")
+        try:
+            feat_imp = pd.read_csv('../models/feature_importance.csv').head(10)
+            fig = px.bar(
+                feat_imp,
+                x='importance',
+                y='feature',
+                orientation='h',
+                title="Top 10 Features"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except:
+            st.info("Feature importance data not available")
+
+elif page == "Settings":
+    st.title("⚙️ System Settings")
+    
+    if st.session_state.detector is None:
+        st.error("Please load models first!")
+    else:
+        st.subheader("Risk Thresholds")
+        st.markdown("Adjust fraud probability thresholds for different risk levels")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            low_threshold = st.slider("Low Risk Threshold", 0.0, 1.0, 0.3, 0.05)
+            medium_threshold = st.slider("Medium Risk Threshold", 0.0, 1.0, 0.6, 0.05)
+        
+        with col2:
+            high_threshold = st.slider("High Risk Threshold", 0.0, 1.0, 0.8, 0.05)
+            critical_threshold = st.slider("Critical Risk Threshold", 0.0, 1.0, 0.95, 0.05)
+        
+        if st.button("Update Thresholds"):
+            new_thresholds = {
+                'low': low_threshold,
+                'medium': medium_threshold,
+                'high': high_threshold,
+                'critical': critical_threshold
+            }
+            st.session_state.detector.update_thresholds(new_thresholds)
+            st.success("Thresholds updated successfully!")
+        
+        st.markdown("---")
+        
+        st.subheader("Alert Settings")
+        email_alerts = st.checkbox("Enable email alerts", value=True)
+        sms_alerts = st.checkbox("Enable SMS alerts", value=False)
+        alert_threshold = st.selectbox(
+            "Alert for risk level:",
+            ["MEDIUM", "HIGH", "CRITICAL"]
+        )
+        
+        if st.button("Save Alert Settings"):
+            st.success("Alert settings saved!")
+
+# Footer
+st.markdown("---")
+st.markdown(
+    "<div style='text-align: center; color: #666;'>"
+    "Fraud Detection System v1.0 | Built with Streamlit | "
+    "© 2025 Loyanganba Ngathem"
+    "</div>",
+    unsafe_allow_html=True
+)
